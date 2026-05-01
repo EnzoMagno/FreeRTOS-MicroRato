@@ -11,10 +11,10 @@
 #include "task.h"
 
 /* Pins */
-#define MOTOR1A_PIN 16
-#define MOTOR1B_PIN 17
-#define MOTOR2A_PIN 14
-#define MOTOR2B_PIN 15
+#define MOTOR1A_PIN 11
+#define MOTOR1B_PIN 10
+#define MOTOR2A_PIN 12
+#define MOTOR2B_PIN 13
 
 #define START_BUTTON 7
 #define RESET_BUTTON 27
@@ -25,29 +25,34 @@
 #define MUXC_PIN 20
 
 /* Legacy behavior constants */
-#define PWM_MAX 160
+#define PWM_MAX 240
 #define PWM_WRAP 255
-#define NOMINAL_SPEED 90
-#define FOLLOW_SPEED NOMINAL_SPEED + 20
-#define MOTOR_MIN_EFFECTIVE_PWM 120
+#define NOMINAL_SPEED 140
+#define FOLLOW_SPEED 150
+#define MOTOR_MIN_EFFECTIVE_PWM 100
 #define FOLLOW_KP 0.12f
 #define FOLLOW_KI 0.0f
-#define FOLLOW_KD 0.44f
+#define FOLLOW_KD 1.0f
+#define ALIGN_FACTOR 1.5f
 
-#define TURN_TIME_U_MS  1320
-#define TURN_TIME_L_MS  660
-#define TURN_TIME_R_MS  660
+#define TURN_TIME_U_MS  1560/2
+#define TURN_TIME_L_MS  720/2
+#define TURN_TIME_R_MS  720/2
 #define U_TURN_POST_STOP_MS 40000
-#define SMALL_FWD_TIME_MS 200
-#define ALIGN_AFTER_UTURN_MS 400
-#define ALIGN_AFTER_TURN_MS 150
+#define SMALL_FWD_TIME_MS 120
+#define ALIGN_AFTER_UTURN_MS 150
+#define ALIGN_AFTER_TURN_MS 140
 #define SOLVE_START_DELAY_MS 5000
+
+/* Temporary debug switch: keep robot stopped at END_MAP and keep printing stacks. */
+#define DEBUG_HOLD_AT_END_MAP 0
+#define DEBUG_STACK_PRINT_PERIOD_MS 1000
 
 #define NODE_DETECTION_DEFAULT 5
 #define NODE_DETECTION_WHITE 5
 
 #define IRSENSORS_COUNT 5
-#define SENSOR_PERIOD_MS 5
+#define SENSOR_PERIOD_MS 1
 #define MAP_PERIOD_MS 10
 #define MOTOR_CTRL_PERIOD_MS 20
 #define DEBUG_PERIOD_MS 120
@@ -124,12 +129,16 @@ static bool g_end_captured = false;
  * Hardware init
  * ================================================================ */
 static void pwm_pin_init(uint pin) {
+    static bool slice_inited[8] = { false };
     gpio_set_function(pin, GPIO_FUNC_PWM);
     uint slice = pwm_gpio_to_slice_num(pin);
-    pwm_config cfg = pwm_get_default_config();
-    pwm_config_set_wrap(&cfg, PWM_WRAP);
-    pwm_init(slice, &cfg, true);
-    pwm_set_gpio_level(pin, 255);
+    if (slice < 8 && !slice_inited[slice]) {
+        pwm_config cfg = pwm_get_default_config();
+        pwm_config_set_wrap(&cfg, PWM_WRAP);
+        pwm_init(slice, &cfg, true);
+        slice_inited[slice] = true;
+    }
+    pwm_set_gpio_level(pin, PWM_WRAP);
 }
 
 static void motors_init(void) {
@@ -186,14 +195,14 @@ static void set_motor_pwm(int new_pwm, uint pin_a, uint pin_b) {
     if (new_pwm < 0 && new_pwm > -MOTOR_MIN_EFFECTIVE_PWM) new_pwm = -MOTOR_MIN_EFFECTIVE_PWM;
 
     if (new_pwm == 0) {
-        pwm_set_gpio_level(pin_a, 255);
-        pwm_set_gpio_level(pin_b, 255);
+        pwm_set_gpio_level(pin_a, PWM_WRAP);
+        pwm_set_gpio_level(pin_b, PWM_WRAP);
     } else if (new_pwm > 0) {
-        pwm_set_gpio_level(pin_a, (uint16_t)(255 - new_pwm));
-        pwm_set_gpio_level(pin_b, 255);
+        pwm_set_gpio_level(pin_a, (uint16_t)(PWM_WRAP - new_pwm));
+        pwm_set_gpio_level(pin_b, PWM_WRAP);
     } else {
-        pwm_set_gpio_level(pin_a, 255);
-        pwm_set_gpio_level(pin_b, (uint16_t)(255 + new_pwm));
+        pwm_set_gpio_level(pin_a, PWM_WRAP);
+        pwm_set_gpio_level(pin_b, (uint16_t)(PWM_WRAP + new_pwm));
     }
 }
 
@@ -242,29 +251,30 @@ static void push_node(char n) {
     }
 }
 
-static void solve_node_stack(void) {
+static void solve_stack(char *stack, int *stack_len) {
     bool changed = true;
-    while (changed && g_node_stack_len >= 3) {
+    while (changed && *stack_len >= 3) {
         changed = false;
-        for (int i = 0; i <= g_node_stack_len - 3; i++) {
-            char a = g_node_stack[i];
-            char b = g_node_stack[i + 1];
-            char c = g_node_stack[i + 2];
+        for (int i = 0; i <= *stack_len - 3; i++) {
+            char a = stack[i];
+            char b = stack[i + 1];
+            char c = stack[i + 2];
             char repl = '\0';
 
             if      (a=='L' && b=='U' && c=='F') repl = 'R';
             else if (a=='R' && b=='U' && c=='F') repl = 'L';
             else if (a=='L' && b=='U' && c=='L') repl = 'F';
+            else if (a=='L' && b=='U' && c=='R') repl = 'U';
             else if (a=='R' && b=='U' && c=='R') repl = 'F';
             else if (a=='F' && b=='U' && c=='L') repl = 'R';
             else if (a=='F' && b=='U' && c=='R') repl = 'L';
 
             if (repl != '\0') {
-                g_node_stack[i] = repl;
-                for (int j = i + 1; j + 2 < g_node_stack_len; j++) {
-                    g_node_stack[j] = g_node_stack[j + 2];
+                stack[i] = repl;
+                for (int j = i + 1; j + 2 < *stack_len; j++) {
+                    stack[j] = stack[j + 2];
                 }
-                g_node_stack_len -= 2;
+                *stack_len -= 2;
                 changed = true;
                 break;
             }
@@ -286,6 +296,11 @@ static void copy_node_stack_to_solve_stack(void) {
     }
 }
 
+static void build_solved_stack_from_node_stack(void) {
+    copy_node_stack_to_solve_stack();
+    solve_stack(g_solve_stack, &g_solve_stack_len);
+}
+
 static void print_solve_stack(void) {
     printf("Solve Stack: ");
     for (int i = 0; i < g_solve_stack_len; i++) printf("%c ", g_solve_stack[i]);
@@ -295,7 +310,7 @@ static void print_solve_stack(void) {
 /* ================================================================
  * Line follower PID step
  * ================================================================ */
-static void robot_follow_line_step(void) {
+static void robot_follow_line_step() {
     static float prev_error = 0.0f;
     static float integral   = 0.0f;
 
@@ -327,6 +342,41 @@ static void robot_follow_line_step(void) {
 
     g_last_cmd = ROBOT_FORWARD;
     set_target_pwm(FOLLOW_SPEED + correction, FOLLOW_SPEED - correction);
+}
+
+static void robot_align_line_step() {
+    static float prev_error = 0.0f;
+    static float integral   = 0.0f;
+
+    uint16_t ir[IRSENSORS_COUNT];
+    taskENTER_CRITICAL();
+    for (int i = 0; i < IRSENSORS_COUNT; i++) ir[i] = g_sensor.ir[i];
+    taskEXIT_CRITICAL();
+
+    int sum = 0;
+    for (int i = 0; i < IRSENSORS_COUNT; i++) sum += ir[i];
+
+    if (sum >= 2500) {
+        integral    = 0.0f;
+        g_last_cmd  = ROBOT_FORWARD;
+        set_target_pwm(FOLLOW_SPEED, FOLLOW_SPEED);
+        return;
+    }
+
+    float error = (-1.1f * (float)ir[0]) + (-1.0f * (float)ir[1]) +
+                  ( 1.0f * (float)ir[3]) + ( 1.1f * (float)ir[4]);
+
+    integral += error;
+    float derivative = error - prev_error;
+    prev_error = error;
+
+    int correction = (int)((FOLLOW_KP * error) + (FOLLOW_KI * integral) + (FOLLOW_KD * derivative));
+    if (correction >  100) correction =  100;
+    if (correction < -100) correction = -100;
+
+    g_last_cmd = ROBOT_FORWARD;
+    correction = (int)(ALIGN_FACTOR * correction);
+    set_target_pwm(correction, -correction);
 }
 
 /* ================================================================
@@ -435,6 +485,7 @@ static void motor_control_task(void *params) {
 static void map_fsm_task(void *params) {
     (void)params;
     TickType_t last = xTaskGetTickCount();
+    TickType_t last_stack_print = 0;
 
     while (true) {
         /* Reset tem prioridade máxima */
@@ -641,7 +692,8 @@ static void map_fsm_task(void *params) {
             case U_TURN:
                 robot_apply_cmd(ROBOT_TURN_RIGHT);
                 vTaskDelay(pdMS_TO_TICKS(TURN_TIME_U_MS));
-                
+                // robot_apply_cmd(ROBOT_STOP);
+                // vTaskDelay(pdMS_TO_TICKS(10000000000));
                 /* Check if line was found; if white, continue turning until line found */
                 char node;
                 taskENTER_CRITICAL();
@@ -669,7 +721,7 @@ static void map_fsm_task(void *params) {
                 /* Align middle sensor on the line via brief follow-line */
                 TickType_t align_start = xTaskGetTickCount();
                 while ((xTaskGetTickCount() - align_start) < pdMS_TO_TICKS(ALIGN_AFTER_UTURN_MS)) {
-                    robot_follow_line_step();
+                    robot_align_line_step();
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
                 
@@ -689,7 +741,7 @@ static void map_fsm_task(void *params) {
                 /* Align middle sensor on the line via brief follow-line */
                 TickType_t align_start_l = xTaskGetTickCount();
                 while ((xTaskGetTickCount() - align_start_l) < pdMS_TO_TICKS(ALIGN_AFTER_TURN_MS)) {
-                    robot_follow_line_step();
+                    robot_align_line_step();
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
                 
@@ -709,7 +761,7 @@ static void map_fsm_task(void *params) {
                 /* Align middle sensor on the line via brief follow-line */
                 TickType_t align_start_r = xTaskGetTickCount();
                 while ((xTaskGetTickCount() - align_start_r) < pdMS_TO_TICKS(ALIGN_AFTER_TURN_MS)) {
-                    robot_follow_line_step();
+                    robot_align_line_step();
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
                 
@@ -764,15 +816,29 @@ static void map_fsm_task(void *params) {
             case END_MAP:
                 robot_apply_cmd(ROBOT_STOP);
                 if (!g_end_captured) {
-                    solve_node_stack();
                     print_node_stack();
-                    copy_node_stack_to_solve_stack();
+                    build_solved_stack_from_node_stack();
                     print_solve_stack();
                     g_end_captured = true;
+#if DEBUG_HOLD_AT_END_MAP
+                    g_run_mode = MODE_SOLVE_DONE;
+                    printf("END_MAP reached. DEBUG hold enabled: robot stopped, continuous stack print.\n");
+#else
                     g_solve_delay_start = xTaskGetTickCount();
                     g_run_mode = MODE_WAIT_SOLVE;
                     printf("END_MAP reached. Waiting %d ms to start solve.\n", SOLVE_START_DELAY_MS);
+#endif
                 }
+
+#if DEBUG_HOLD_AT_END_MAP
+                if ((xTaskGetTickCount() - last_stack_print) >= pdMS_TO_TICKS(DEBUG_STACK_PRINT_PERIOD_MS)) {
+                    printf("[END_MAP DEBUG] ");
+                    print_node_stack();
+                    printf("[END_MAP DEBUG] ");
+                    print_solve_stack();
+                    last_stack_print = xTaskGetTickCount();
+                }
+#endif
                 break;
 
             case REVERSE_MAP:
