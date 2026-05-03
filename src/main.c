@@ -39,7 +39,7 @@
 #define TURN_TIME_L_MS  720/2
 #define TURN_TIME_R_MS  720/2
 #define U_TURN_POST_STOP_MS 40000
-#define SMALL_FWD_TIME_MS 120
+#define SMALL_FWD_TIME_MS 90
 #define ALIGN_AFTER_UTURN_MS 150
 #define ALIGN_AFTER_TURN_MS 140
 #define SOLVE_START_DELAY_MS 5000
@@ -48,11 +48,11 @@
 #define DEBUG_HOLD_AT_END_MAP 0
 #define DEBUG_STACK_PRINT_PERIOD_MS 1000
 
-#define NODE_DETECTION_DEFAULT 5
-#define NODE_DETECTION_WHITE 5
+#define NODE_DETECTION_DEFAULT 2
+#define NODE_DETECTION_WHITE 2
 
 #define IRSENSORS_COUNT 5
-#define SENSOR_PERIOD_MS 1
+#define SENSOR_PERIOD_MS 3
 #define MAP_PERIOD_MS 10
 #define MOTOR_CTRL_PERIOD_MS 20
 #define DEBUG_PERIOD_MS 120
@@ -266,6 +266,8 @@ static void solve_stack(char *stack, int *stack_len) {
             else if (a=='L' && b=='U' && c=='L') repl = 'F';
             else if (a=='L' && b=='U' && c=='R') repl = 'U';
             else if (a=='R' && b=='U' && c=='R') repl = 'F';
+            else if (a=='L' && b=='U' && c=='R') repl = 'U';
+            else if (a=='R' && b=='U' && c=='L') repl = 'U';
             else if (a=='F' && b=='U' && c=='L') repl = 'R';
             else if (a=='F' && b=='U' && c=='R') repl = 'L';
 
@@ -595,8 +597,8 @@ static void map_fsm_task(void *params) {
                 case LEFT_TURN_SOLVE:
                     robot_apply_cmd(ROBOT_TURN_LEFT);
                     vTaskDelay(pdMS_TO_TICKS(TURN_TIME_L_MS));
-                    robot_apply_cmd(ROBOT_STOP);
-                    vTaskDelay(pdMS_TO_TICKS(50));
+                    // robot_apply_cmd(ROBOT_STOP);
+                    // vTaskDelay(pdMS_TO_TICKS(50));
                     {
                         TickType_t align_start = xTaskGetTickCount();
                         while ((xTaskGetTickCount() - align_start) < pdMS_TO_TICKS(ALIGN_AFTER_TURN_MS)) {
@@ -715,8 +717,8 @@ static void map_fsm_task(void *params) {
                     }
                 }
                 
-                robot_apply_cmd(ROBOT_STOP);
-                vTaskDelay(pdMS_TO_TICKS(100));
+                // robot_apply_cmd(ROBOT_STOP);
+                // vTaskDelay(pdMS_TO_TICKS(100));
                 
                 /* Align middle sensor on the line via brief follow-line */
                 TickType_t align_start = xTaskGetTickCount();
@@ -794,6 +796,7 @@ static void map_fsm_task(void *params) {
                     } else {
                         /* Linha continua em frente — ignora o nó R */
                         g_map_state = FOLLOW_LINE_MAP;
+                        push_node('F');
                     }
                 } else if (g_past_node == 'B') {
                     if (node == 'B' || node == 'L' || node == 'R') {
