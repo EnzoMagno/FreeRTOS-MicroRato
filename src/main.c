@@ -11,10 +11,15 @@
 #include "task.h"
 
 /* Pins */
-#define MOTOR1A_PIN 16
-#define MOTOR1B_PIN 17
-#define MOTOR2A_PIN 14
-#define MOTOR2B_PIN 15
+/* TB6612FNG — Motor A (esquerdo) */
+#define MOTOR_A_PWM_PIN  8
+#define MOTOR_A_IN1_PIN  10
+#define MOTOR_A_IN2_PIN  9
+/* TB6612FNG — Motor B (direito) */
+#define MOTOR_B_PWM_PIN  13
+#define MOTOR_B_IN1_PIN  11
+#define MOTOR_B_IN2_PIN  12
+/* STBY ligado a 3V3 — sempre activo, sem GPIO necessário */
 
 #define START_BUTTON 7
 #define RESET_BUTTON 27
@@ -25,18 +30,18 @@
 #define MUXC_PIN 20
 
 /* Legacy behavior constants */
-#define PWM_MAX 160
+#define PWM_MAX 255
 #define PWM_WRAP 255
-#define NOMINAL_SPEED 90
-#define FOLLOW_SPEED NOMINAL_SPEED + 20
+#define NOMINAL_SPEED 120
+#define FOLLOW_SPEED NOMINAL_SPEED + 30
 #define MOTOR_MIN_EFFECTIVE_PWM 120
-#define FOLLOW_KP 0.12f
+#define FOLLOW_KP 0.07f
 #define FOLLOW_KI 0.0f
-#define FOLLOW_KD 0.44f
+#define FOLLOW_KD 0.5f
 
-#define TURN_TIME_U_MS  1320
-#define TURN_TIME_L_MS  660
-#define TURN_TIME_R_MS  660
+#define TURN_TIME_U_MS  1300
+#define TURN_TIME_L_MS  680
+#define TURN_TIME_R_MS  680
 #define U_TURN_POST_STOP_MS 40000
 #define SMALL_FWD_TIME_MS 200
 #define ALIGN_AFTER_UTURN_MS 400
@@ -75,6 +80,7 @@ typedef enum {
 } map_state_t;
 
 typedef enum {
+    MODE_TEST,          
     MODE_MAP,
     MODE_WAIT_SOLVE,
     MODE_SOLVE,
@@ -91,6 +97,15 @@ typedef enum {
     FINISH_SOLVE
 } solve_state_t;
 
+typedef enum {
+    TEST_IDLE,
+    TEST_RIGHT,
+    TEST_LEFT,
+    TEST_UTURN,
+    TEST_SMALL_FWD,
+    TEST_DONE
+} test_state_t;
+
 typedef struct {
     int left;
     int right;
@@ -106,8 +121,9 @@ static volatile motor_pair_t g_current = {0, 0};
 static volatile sensor_data_t g_sensor = {{0}, 'N'};
 static volatile robot_cmd_t g_last_cmd = ROBOT_STOP;
 static volatile map_state_t g_map_state = IDLE_MAP;
-static volatile run_mode_t g_run_mode = MODE_MAP;
+static volatile run_mode_t g_run_mode = MODE_TEST;
 static volatile solve_state_t g_solve_state = IDLE_SOLVE;
+static volatile test_state_t   g_test_state  = TEST_IDLE;
 
 static char g_node_stack[256];
 static int  g_node_stack_len = 0;
@@ -129,14 +145,24 @@ static void pwm_pin_init(uint pin) {
     pwm_config cfg = pwm_get_default_config();
     pwm_config_set_wrap(&cfg, PWM_WRAP);
     pwm_init(slice, &cfg, true);
-    pwm_set_gpio_level(pin, 255);
+    pwm_set_gpio_level(pin, 0);   /* TB6612: 0 = parado */
+}
+
+static void dir_pin_init(uint pin) {
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_OUT);
+    gpio_put(pin, 0);
 }
 
 static void motors_init(void) {
-    pwm_pin_init(MOTOR1A_PIN);
-    pwm_pin_init(MOTOR1B_PIN);
-    pwm_pin_init(MOTOR2A_PIN);
-    pwm_pin_init(MOTOR2B_PIN);
+    /* PWM pins */
+    pwm_pin_init(MOTOR_A_PWM_PIN);
+    pwm_pin_init(MOTOR_B_PWM_PIN);
+    /* Direction pins */
+    dir_pin_init(MOTOR_A_IN1_PIN);
+    dir_pin_init(MOTOR_A_IN2_PIN);
+    dir_pin_init(MOTOR_B_IN1_PIN);
+    dir_pin_init(MOTOR_B_IN2_PIN);
 }
 
 static void buttons_init(void) {
@@ -178,7 +204,12 @@ static uint16_t read_mux_adc(uint8_t channel) {
 /* ================================================================
  * Motor control
  * ================================================================ */
-static void set_motor_pwm(int new_pwm, uint pin_a, uint pin_b) {
+/* TB6612FNG: pwm_pin controla velocidade (0-255),
+   in1/in2 controlam direção.
+   Frente  : IN1=1 IN2=0
+   Trás    : IN1=0 IN2=1
+   Travagem: IN1=0 IN2=0 (coast) */
+static void set_motor_pwm(int new_pwm, uint pwm_pin, uint in1_pin, uint in2_pin) {
     if (new_pwm >  PWM_MAX) new_pwm =  PWM_MAX;
     if (new_pwm < -PWM_MAX) new_pwm = -PWM_MAX;
 
@@ -186,14 +217,17 @@ static void set_motor_pwm(int new_pwm, uint pin_a, uint pin_b) {
     if (new_pwm < 0 && new_pwm > -MOTOR_MIN_EFFECTIVE_PWM) new_pwm = -MOTOR_MIN_EFFECTIVE_PWM;
 
     if (new_pwm == 0) {
-        pwm_set_gpio_level(pin_a, 255);
-        pwm_set_gpio_level(pin_b, 255);
+        gpio_put(in1_pin, 0);
+        gpio_put(in2_pin, 0);
+        pwm_set_gpio_level(pwm_pin, 0);
     } else if (new_pwm > 0) {
-        pwm_set_gpio_level(pin_a, (uint16_t)(255 - new_pwm));
-        pwm_set_gpio_level(pin_b, 255);
+        gpio_put(in1_pin, 1);
+        gpio_put(in2_pin, 0);
+        pwm_set_gpio_level(pwm_pin, (uint16_t)new_pwm);
     } else {
-        pwm_set_gpio_level(pin_a, 255);
-        pwm_set_gpio_level(pin_b, (uint16_t)(255 + new_pwm));
+        gpio_put(in1_pin, 0);
+        gpio_put(in2_pin, 1);
+        pwm_set_gpio_level(pwm_pin, (uint16_t)(-new_pwm));
     }
 }
 
@@ -256,6 +290,8 @@ static void solve_node_stack(void) {
             else if (a=='R' && b=='U' && c=='F') repl = 'L';
             else if (a=='L' && b=='U' && c=='L') repl = 'F';
             else if (a=='R' && b=='U' && c=='R') repl = 'F';
+            else if (a=='L' && b=='U' && c=='R') repl = 'U';
+            else if (a=='R' && b=='U' && c=='L') repl = 'U';
             else if (a=='F' && b=='U' && c=='L') repl = 'R';
             else if (a=='F' && b=='U' && c=='R') repl = 'L';
 
@@ -359,6 +395,7 @@ static const char *map_state_name(map_state_t s) {
 
 static const char *run_mode_name(run_mode_t m) {
     switch (m) {
+        case MODE_TEST:       return "TEST";
         case MODE_MAP:        return "MAP";
         case MODE_WAIT_SOLVE: return "WAIT_SOLVE";
         case MODE_SOLVE:      return "SOLVE";
@@ -420,8 +457,8 @@ static void motor_control_task(void *params) {
         tr = g_target.right;
         taskEXIT_CRITICAL();
 
-        set_motor_pwm(tl, MOTOR1A_PIN, MOTOR1B_PIN);
-        set_motor_pwm(tr, MOTOR2A_PIN, MOTOR2B_PIN);
+        set_motor_pwm(tl, MOTOR_A_PWM_PIN, MOTOR_A_IN1_PIN, MOTOR_A_IN2_PIN);
+        set_motor_pwm(tr, MOTOR_B_PWM_PIN, MOTOR_B_IN1_PIN, MOTOR_B_IN2_PIN);
 
         taskENTER_CRITICAL();
         g_current.left  = tl;
@@ -432,6 +469,9 @@ static void motor_control_task(void *params) {
     }
 }
 
+
+
+
 static void map_fsm_task(void *params) {
     (void)params;
     TickType_t last = xTaskGetTickCount();
@@ -440,7 +480,7 @@ static void map_fsm_task(void *params) {
         /* Reset tem prioridade máxima */
         if (button_pressed(RESET_BUTTON)) {
             g_map_state      = IDLE_MAP;
-            g_run_mode       = MODE_MAP;
+            g_run_mode       = MODE_TEST;
             g_solve_state    = IDLE_SOLVE;
             g_node_count     = 0;
             g_past_node      = ' ';
@@ -448,6 +488,7 @@ static void map_fsm_task(void *params) {
             g_solve_stack_len = 0;
             g_solve_stack_pos = 0;
             g_end_captured    = false;
+            g_test_state      = TEST_IDLE;
             robot_apply_cmd(ROBOT_STOP);
             vTaskDelayUntil(&last, pdMS_TO_TICKS(MAP_PERIOD_MS));
             continue;
@@ -466,6 +507,74 @@ static void map_fsm_task(void *params) {
                 g_node_count = 0;
                 g_past_node = ' ';
                 printf("SOLVE start after wait.\n");
+            }
+            vTaskDelayUntil(&last, pdMS_TO_TICKS(MAP_PERIOD_MS));
+            continue;
+        }
+
+
+        /* ── MODO TESTE ─────────────────────────────────────────── */
+        if (g_run_mode == MODE_TEST) {
+            switch (g_test_state) {
+                case TEST_IDLE:
+                    printf("TEST: inicio — vira direita\n");
+                    robot_apply_cmd(ROBOT_TURN_RIGHT);
+                    vTaskDelay(pdMS_TO_TICKS(TURN_TIME_R_MS));
+                    robot_apply_cmd(ROBOT_STOP);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    g_test_state = TEST_RIGHT;
+                    last = xTaskGetTickCount();
+                    break;
+
+                case TEST_RIGHT:
+                    printf("TEST: vira esquerda\n");
+                    robot_apply_cmd(ROBOT_TURN_LEFT);
+                    vTaskDelay(pdMS_TO_TICKS(TURN_TIME_L_MS));
+                    robot_apply_cmd(ROBOT_STOP);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    g_test_state = TEST_LEFT;
+                    last = xTaskGetTickCount();
+                    break;
+
+                case TEST_LEFT:
+                    printf("TEST: U-turn\n");
+                    robot_apply_cmd(ROBOT_TURN_RIGHT);
+                    vTaskDelay(pdMS_TO_TICKS(TURN_TIME_U_MS));
+                    robot_apply_cmd(ROBOT_STOP);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    g_test_state = TEST_UTURN;
+                    last = xTaskGetTickCount();
+                    break;
+
+                case TEST_UTURN:
+                    printf("TEST: small forward\n");
+                    robot_apply_cmd(ROBOT_FORWARD);
+                    vTaskDelay(pdMS_TO_TICKS(SMALL_FWD_TIME_MS));
+                    robot_apply_cmd(ROBOT_STOP);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    g_test_state = TEST_SMALL_FWD;
+                    last = xTaskGetTickCount();
+                    break;
+
+                case TEST_SMALL_FWD:
+                    printf("TEST: concluido — pressiona START para mapear\n");
+                    g_test_state = TEST_DONE;
+                    last = xTaskGetTickCount();
+                    break;
+
+                case TEST_DONE:
+                    robot_apply_cmd(ROBOT_STOP);
+                    /* Aguarda START para passar ao mapeamento normal */
+                    if (button_pressed(START_BUTTON)) {
+                        vTaskDelay(pdMS_TO_TICKS(50)); /* debounce */
+                        g_run_mode   = MODE_MAP;
+                        g_map_state  = IDLE_MAP;
+                        g_node_count = 0;
+                        g_past_node  = ' ';
+                        printf("TEST: a iniciar mapeamento\n");
+                        last = xTaskGetTickCount();
+                    }
+                    break;
             }
             vTaskDelayUntil(&last, pdMS_TO_TICKS(MAP_PERIOD_MS));
             continue;
@@ -742,6 +851,7 @@ static void map_fsm_task(void *params) {
                     } else {
                         /* Linha continua em frente — ignora o nó R */
                         g_map_state = FOLLOW_LINE_MAP;
+                        push_node('F');
                     }
                 } else if (g_past_node == 'B') {
                     if (node == 'B' || node == 'L' || node == 'R') {
@@ -759,6 +869,7 @@ static void map_fsm_task(void *params) {
 
             case FORWARD_MAP:
                 robot_apply_cmd(ROBOT_FORWARD);
+
                 break;
 
             case END_MAP:
