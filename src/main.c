@@ -11,10 +11,10 @@
 #include "task.h"
 
 /* Pins */
-#define MOTOR1A_PIN 11
-#define MOTOR1B_PIN 10
-#define MOTOR2A_PIN 12
-#define MOTOR2B_PIN 13
+#define MOTOR1A_PIN 17
+#define MOTOR1B_PIN 16
+#define MOTOR2A_PIN 14
+#define MOTOR2B_PIN 15
 
 #define START_BUTTON 7
 #define RESET_BUTTON 27
@@ -27,13 +27,13 @@
 /* Legacy behavior constants */
 #define PWM_MAX 240
 #define PWM_WRAP 255
-#define NOMINAL_SPEED 140
-#define FOLLOW_SPEED 150
+#define NOMINAL_SPEED 150
+#define FOLLOW_SPEED 130
 #define MOTOR_MIN_EFFECTIVE_PWM 100
-#define FOLLOW_KP 0.12f
+#define FOLLOW_KP 0.01f
 #define FOLLOW_KI 0.0f
-#define FOLLOW_KD 1.0f
-#define ALIGN_FACTOR 1.5f
+#define FOLLOW_KD 0.1f
+#define ALIGN_FACTOR 1.2f
 
 #define TURN_TIME_U_MS  1560/2
 #define TURN_TIME_L_MS  720/2
@@ -447,17 +447,27 @@ static void led_task(void *params) {
 
 static void sensor_task(void *params) {
     (void)params;
+    
+    // Define explicitamente quais canais do MUX ler
+    // Ordem: Sensor 0, Sensor 1, Sensor 2, Sensor 3, Sensor 4
+    const uint8_t canais_mux[IRSENSORS_COUNT] = {2, 4, 5, 6, 7};
+    
     TickType_t last = xTaskGetTickCount();
     while (true) {
         uint16_t local_ir[IRSENSORS_COUNT];
+        
         for (uint8_t i = 0; i < IRSENSORS_COUNT; i++) {
-            local_ir[IRSENSORS_COUNT - 1 - i] = read_mux_adc((uint8_t)(3u + i));
+            // Lê o canal definido no nosso array de mapeamento
+            local_ir[IRSENSORS_COUNT - 1 - i] = read_mux_adc(canais_mux[i]);
         }
+        
         char node = detect_node_from_ir(local_ir);
+        
         taskENTER_CRITICAL();
         for (int i = 0; i < IRSENSORS_COUNT; i++) g_sensor.ir[i] = local_ir[i];
         g_sensor.node = node;
         taskEXIT_CRITICAL();
+        
         vTaskDelayUntil(&last, pdMS_TO_TICKS(SENSOR_PERIOD_MS));
     }
 }
