@@ -11,13 +11,13 @@
 #include "task.h"
 
 /* Pins */
-#define MOTOR1A_PIN 11
-#define MOTOR1B_PIN 10
-#define MOTOR2A_PIN 12
-#define MOTOR2B_PIN 13
+#define MOTOR1A_PIN 10
+#define MOTOR1B_PIN 11
+#define MOTOR2A_PIN 13
+#define MOTOR2B_PIN 12
 
-#define START_BUTTON 7
-#define RESET_BUTTON 27
+#define START_BUTTON 8
+#define RESET_BUTTON 2
 
 #define ADC_IN_PIN 28
 #define MUXA_PIN 18
@@ -30,18 +30,18 @@
 #define NOMINAL_SPEED 140
 #define FOLLOW_SPEED 150
 #define MOTOR_MIN_EFFECTIVE_PWM 100
-#define FOLLOW_KP 0.12f
+#define FOLLOW_KP 0.07f
 #define FOLLOW_KI 0.0f
-#define FOLLOW_KD 1.0f
-#define ALIGN_FACTOR 1.5f
+#define FOLLOW_KD 0.5f
+#define ALIGN_FACTOR 1.3f
 
-#define TURN_TIME_U_MS  1560/2
-#define TURN_TIME_L_MS  720/2
-#define TURN_TIME_R_MS  720/2
+#define TURN_TIME_U_MS  1600/2
+#define TURN_TIME_L_MS  860/2
+#define TURN_TIME_R_MS  860/2
 #define U_TURN_POST_STOP_MS 40000
 #define SMALL_FWD_TIME_MS 90
-#define ALIGN_AFTER_UTURN_MS 150
-#define ALIGN_AFTER_TURN_MS 140
+#define ALIGN_AFTER_UTURN_MS 250
+#define ALIGN_AFTER_TURN_MS 250
 #define SOLVE_START_DELAY_MS 5000
 
 /* Temporary debug switch: keep robot stopped at END_MAP and keep printing stacks. */
@@ -80,10 +80,12 @@ typedef enum {
 } map_state_t;
 
 typedef enum {
+    MODE_IDLE,
     MODE_MAP,
     MODE_WAIT_SOLVE,
     MODE_SOLVE,
-    MODE_SOLVE_DONE
+    MODE_SOLVE_DONE,
+    MODE_PAUSED
 } run_mode_t;
 
 typedef enum {
@@ -111,8 +113,10 @@ static volatile motor_pair_t g_current = {0, 0};
 static volatile sensor_data_t g_sensor = {{0}, 'N'};
 static volatile robot_cmd_t g_last_cmd = ROBOT_STOP;
 static volatile map_state_t g_map_state = IDLE_MAP;
-static volatile run_mode_t g_run_mode = MODE_MAP;
+static volatile run_mode_t g_run_mode = MODE_IDLE;
 static volatile solve_state_t g_solve_state = IDLE_SOLVE;
+static volatile run_mode_t g_paused_mode = MODE_IDLE;
+static volatile bool g_is_paused = false;
 
 static char g_node_stack[256];
 static int  g_node_stack_len = 0;
@@ -411,10 +415,12 @@ static const char *map_state_name(map_state_t s) {
 
 static const char *run_mode_name(run_mode_t m) {
     switch (m) {
+        case MODE_IDLE:       return "IDLE";
         case MODE_MAP:        return "MAP";
         case MODE_WAIT_SOLVE: return "WAIT_SOLVE";
         case MODE_SOLVE:      return "SOLVE";
         case MODE_SOLVE_DONE: return "SOLVE_DONE";
+        case MODE_PAUSED:     return "PAUSED";
         default:              return "UNKNOWN";
     }
 }
@@ -488,38 +494,78 @@ static void map_fsm_task(void *params) {
     (void)params;
     TickType_t last = xTaskGetTickCount();
     TickType_t last_stack_print = 0;
+    bool button_red_prev = false;
+    bool button_black_prev = false;
 
     while (true) {
-        /* Reset tem prioridade máxima */
-        if (button_pressed(RESET_BUTTON)) {
-            g_map_state      = IDLE_MAP;
-            g_run_mode       = MODE_MAP;
-            g_solve_state    = IDLE_SOLVE;
-            g_node_count     = 0;
-            g_past_node      = ' ';
-            g_node_stack_len = 0;
-            g_solve_stack_len = 0;
-            g_solve_stack_pos = 0;
-            g_end_captured    = false;
+        /* Botão vermelho (RESET_BUTTON): pausa/resume */
+        bool button_red_pressed = button_pressed(RESET_BUTTON);
+        if (button_red_pressed && !button_red_prev) {
+            /* Transição de botão pressionado */
+            if (g_is_paused) {
+                /* Retomar de pausa */
+                g_run_mode = g_paused_mode;
+                g_is_paused = false;
+                printf("Resuming from pause.\n");
+            } else {
+                /* Entrar em pausa */
+                g_paused_mode = g_run_mode;
+                g_run_mode = MODE_PAUSED;
+                g_is_paused = true;
+                robot_apply_cmd(ROBOT_STOP);
+                printf("Paused.\n");
+            }
+        }
+        button_red_prev = button_red_pressed;
+
+        /* Se está pausado, apenas aguarda botão vermelho novamente */
+        if (g_is_paused) {
             robot_apply_cmd(ROBOT_STOP);
             vTaskDelayUntil(&last, pdMS_TO_TICKS(MAP_PERIOD_MS));
             continue;
         }
+
+        /* Botão preto (START_BUTTON): inicia mapeamento ou solve */
+        bool button_black_pressed = button_pressed(START_BUTTON);
+        if (button_black_pressed && !button_black_prev) {
+            /* Transição de botão pressionado */
+            if (g_run_mode == MODE_IDLE) {
+                /* Iniciar mapeamento */
+                g_run_mode = MODE_MAP;
+                g_map_state = IDLE_MAP;
+                g_solve_state = IDLE_SOLVE;
+                g_node_count = 0;
+                g_past_node = ' ';
+                g_node_stack_len = 0;
+                g_solve_stack_len = 0;
+                g_solve_stack_pos = 0;
+                g_end_captured = false;
+                printf("Starting mapping...\n");
+            } else if (g_run_mode == MODE_WAIT_SOLVE) {
+                /* Iniciar solve */
+                g_run_mode = MODE_SOLVE;
+                g_solve_state = IDLE_SOLVE;
+                g_node_count = 0;
+                g_past_node = ' ';
+                printf("Starting solve...\n");
+            }
+        }
+        button_black_prev = button_black_pressed;
 
         char node;
         taskENTER_CRITICAL();
         node = g_sensor.node;
         taskEXIT_CRITICAL();
 
+        /* Modo IDLE: aguardando início */
+        if (g_run_mode == MODE_IDLE) {
+            robot_apply_cmd(ROBOT_STOP);
+            vTaskDelayUntil(&last, pdMS_TO_TICKS(MAP_PERIOD_MS));
+            continue;
+        }
+
         if (g_run_mode == MODE_WAIT_SOLVE) {
             robot_apply_cmd(ROBOT_STOP);
-            if ((xTaskGetTickCount() - g_solve_delay_start) >= pdMS_TO_TICKS(SOLVE_START_DELAY_MS)) {
-                g_run_mode = MODE_SOLVE;
-                g_solve_state = IDLE_SOLVE;
-                g_node_count = 0;
-                g_past_node = ' ';
-                printf("SOLVE start after wait.\n");
-            }
             vTaskDelayUntil(&last, pdMS_TO_TICKS(MAP_PERIOD_MS));
             continue;
         }
@@ -827,9 +873,8 @@ static void map_fsm_task(void *params) {
                     g_run_mode = MODE_SOLVE_DONE;
                     printf("END_MAP reached. DEBUG hold enabled: robot stopped, continuous stack print.\n");
 #else
-                    g_solve_delay_start = xTaskGetTickCount();
                     g_run_mode = MODE_WAIT_SOLVE;
-                    printf("END_MAP reached. Waiting %d ms to start solve.\n", SOLVE_START_DELAY_MS);
+                    printf("Mapping complete. Press BLACK button to start solve.\n");
 #endif
                 }
 
@@ -908,6 +953,7 @@ int main(void) {
     sensors_init();
     buttons_init();
     robot_apply_cmd(ROBOT_STOP);
+    printf("Robot ready. Press BLACK button to start mapping.\n");
 
     xTaskCreate(led_task,          "LED",       2048, NULL, 1, NULL);
     xTaskCreate(sensor_task,       "SENSOR",    2048, NULL, 3, NULL);
