@@ -44,6 +44,8 @@
 #define ALIGN_AFTER_TURN_MS 250
 #define SOLVE_START_DELAY_MS 5000
 
+#define BUTTON_DEBOUNCE_MS 50
+
 /* Temporary debug switch: keep robot stopped at END_MAP and keep printing stacks. */
 #define DEBUG_HOLD_AT_END_MAP 0
 #define DEBUG_STACK_PRINT_PERIOD_MS 1000
@@ -117,6 +119,7 @@ static volatile run_mode_t g_run_mode = MODE_IDLE;
 static volatile solve_state_t g_solve_state = IDLE_SOLVE;
 static volatile run_mode_t g_paused_mode = MODE_IDLE;
 static volatile bool g_is_paused = false;
+static volatile bool g_mapping_done = false;
 
 static char g_node_stack[256];
 static int  g_node_stack_len = 0;
@@ -496,24 +499,30 @@ static void map_fsm_task(void *params) {
     TickType_t last_stack_print = 0;
     bool button_red_prev = false;
     bool button_black_prev = false;
+    TickType_t last_black_edge = 0;
+    TickType_t last_red_edge = 0;
 
     while (true) {
-        /* Botão vermelho (RESET_BUTTON): pausa/resume */
+        /* Botão vermelho (RESET_BUTTON): pausa/resume (falling edge, debounced) */
         bool button_red_pressed = button_pressed(RESET_BUTTON);
         if (button_red_pressed && !button_red_prev) {
-            /* Transição de botão pressionado */
-            if (g_is_paused) {
-                /* Retomar de pausa */
-                g_run_mode = g_paused_mode;
-                g_is_paused = false;
-                printf("Resuming from pause.\n");
-            } else {
-                /* Entrar em pausa */
-                g_paused_mode = g_run_mode;
-                g_run_mode = MODE_PAUSED;
-                g_is_paused = true;
-                robot_apply_cmd(ROBOT_STOP);
-                printf("Paused.\n");
+            TickType_t now = xTaskGetTickCount();
+            if ((now - last_red_edge) > pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS)) {
+                last_red_edge = now;
+                /* Transição de botão pressionado */
+                if (g_is_paused) {
+                    /* Retomar de pausa */
+                    g_run_mode = g_paused_mode;
+                    g_is_paused = false;
+                    printf("Resuming from pause.\n");
+                } else {
+                    /* Entrar em pausa */
+                    g_paused_mode = g_run_mode;
+                    g_run_mode = MODE_PAUSED;
+                    g_is_paused = true;
+                    robot_apply_cmd(ROBOT_STOP);
+                    printf("Paused.\n");
+                }
             }
         }
         button_red_prev = button_red_pressed;
@@ -525,29 +534,44 @@ static void map_fsm_task(void *params) {
             continue;
         }
 
-        /* Botão preto (START_BUTTON): inicia mapeamento ou solve */
+        /* Botão preto (START_BUTTON): inicia mapeamento ou solve (falling edge, debounced) */
         bool button_black_pressed = button_pressed(START_BUTTON);
         if (button_black_pressed && !button_black_prev) {
-            /* Transição de botão pressionado */
-            if (g_run_mode == MODE_IDLE) {
-                /* Iniciar mapeamento */
-                g_run_mode = MODE_MAP;
-                g_map_state = IDLE_MAP;
-                g_solve_state = IDLE_SOLVE;
-                g_node_count = 0;
-                g_past_node = ' ';
-                g_node_stack_len = 0;
-                g_solve_stack_len = 0;
-                g_solve_stack_pos = 0;
-                g_end_captured = false;
-                printf("Starting mapping...\n");
-            } else if (g_run_mode == MODE_WAIT_SOLVE) {
-                /* Iniciar solve */
-                g_run_mode = MODE_SOLVE;
-                g_solve_state = IDLE_SOLVE;
-                g_node_count = 0;
-                g_past_node = ' ';
-                printf("Starting solve...\n");
+            TickType_t now = xTaskGetTickCount();
+            if ((now - last_black_edge) > pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS)) {
+                last_black_edge = now;
+                /* Transição de botão pressionado */
+                if (g_run_mode == MODE_IDLE) {
+                    if (!g_mapping_done) {
+                        /* First-time mapping */
+                        g_run_mode = MODE_MAP;
+                        g_map_state = IDLE_MAP;
+                        g_solve_state = IDLE_SOLVE;
+                        g_node_count = 0;
+                        g_past_node = ' ';
+                        g_node_stack_len = 0;
+                        g_solve_stack_len = 0;
+                        g_solve_stack_pos = 0;
+                        g_end_captured = false;
+                        printf("Starting mapping...\n");
+                    } else {
+                        /* Mapping already done — start solve directly */
+                        g_run_mode = MODE_SOLVE;
+                        g_solve_state = IDLE_SOLVE;
+                        g_solve_stack_pos = 0;
+                        g_node_count = 0;
+                        g_past_node = ' ';
+                        printf("Starting solve (re-run)...\n");
+                    }
+                } else if (g_run_mode == MODE_WAIT_SOLVE) {
+                    /* Iniciar solve from wait state */
+                    g_run_mode = MODE_SOLVE;
+                    g_solve_state = IDLE_SOLVE;
+                    g_solve_stack_pos = 0;
+                    g_node_count = 0;
+                    g_past_node = ' ';
+                    printf("Starting solve...\n");
+                }
             }
         }
         button_black_prev = button_black_pressed;
@@ -667,7 +691,9 @@ static void map_fsm_task(void *params) {
 
                 case FINISH_SOLVE:
                     robot_apply_cmd(ROBOT_STOP);
-                    g_run_mode = MODE_SOLVE_DONE;
+                    /* Solve finished — return to WAIT_SOLVE so pressing BLACK reruns solve using same stack */
+                    g_run_mode = MODE_WAIT_SOLVE;
+                    printf("Solve finished. Press BLACK to run solve again.\n");
                     break;
 
                 case IDLE_SOLVE:
@@ -743,7 +769,6 @@ static void map_fsm_task(void *params) {
                 // robot_apply_cmd(ROBOT_STOP);
                 // vTaskDelay(pdMS_TO_TICKS(10000000000));
                 /* Check if line was found; if white, continue turning until line found */
-                char node;
                 taskENTER_CRITICAL();
                 node = g_sensor.node;
                 taskEXIT_CRITICAL();
@@ -873,6 +898,7 @@ static void map_fsm_task(void *params) {
                     g_run_mode = MODE_SOLVE_DONE;
                     printf("END_MAP reached. DEBUG hold enabled: robot stopped, continuous stack print.\n");
 #else
+                    g_mapping_done = true;
                     g_run_mode = MODE_WAIT_SOLVE;
                     printf("Mapping complete. Press BLACK button to start solve.\n");
 #endif
