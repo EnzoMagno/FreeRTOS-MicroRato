@@ -16,8 +16,8 @@
 #define MOTOR2A_PIN 13
 #define MOTOR2B_PIN 12
 
-#define START_BUTTON 8
-#define RESET_BUTTON 2
+#define START_BUTTON 9
+#define RESET_BUTTON 3
 
 #define ADC_IN_PIN 28
 #define MUXA_PIN 18
@@ -25,21 +25,21 @@
 #define MUXC_PIN 20
 
 /* Legacy behavior constants */
-#define PWM_MAX 240
+#define PWM_MAX 195
 #define PWM_WRAP 255
-#define NOMINAL_SPEED 140
-#define FOLLOW_SPEED 150
+#define NOMINAL_SPEED 130
+#define FOLLOW_SPEED 120
 #define MOTOR_MIN_EFFECTIVE_PWM 100
 #define FOLLOW_KP 0.07f
 #define FOLLOW_KI 0.0f
 #define FOLLOW_KD 0.5f
 #define ALIGN_FACTOR 1.3f
 
-#define TURN_TIME_U_MS  1600/2
-#define TURN_TIME_L_MS  860/2
-#define TURN_TIME_R_MS  860/2
+#define TURN_TIME_U_MS  1800/2
+#define TURN_TIME_L_MS  900/2
+#define TURN_TIME_R_MS  900/2
 #define U_TURN_POST_STOP_MS 40000
-#define SMALL_FWD_TIME_MS 90
+#define SMALL_FWD_TIME_MS 150
 #define ALIGN_AFTER_UTURN_MS 250
 #define ALIGN_AFTER_TURN_MS 250
 #define SOLVE_START_DELAY_MS 5000
@@ -50,8 +50,8 @@
 #define DEBUG_HOLD_AT_END_MAP 0
 #define DEBUG_STACK_PRINT_PERIOD_MS 1000
 
-#define NODE_DETECTION_DEFAULT 2
-#define NODE_DETECTION_WHITE 2
+#define NODE_DETECTION_DEFAULT 4
+#define NODE_DETECTION_WHITE 4
 
 #define IRSENSORS_COUNT 5
 #define SENSOR_PERIOD_MS 3
@@ -59,7 +59,8 @@
 #define MOTOR_CTRL_PERIOD_MS 20
 #define DEBUG_PERIOD_MS 120
 
-#define IR_THRESHOLD 500
+#define IR_THRESHOLD_HIGH 550
+#define IR_THRESHOLD_LOW  450
 
 typedef enum {
     ROBOT_STOP,
@@ -236,16 +237,39 @@ static void robot_apply_cmd(robot_cmd_t cmd) {
  * Sensor / node detection
  * ================================================================ */
 static char detect_node_from_ir(const uint16_t ir[IRSENSORS_COUNT]) {
-    char pattern[6];
-    for (int i = 0; i < IRSENSORS_COUNT; i++) {
-        pattern[i] = (ir[i] > IR_THRESHOLD) ? '1' : '0';
-    }
-    pattern[5] = '\0';
+    /* Histerese: evita oscilação nos sensores próximos do threshold */
+    
 
-    if ((strcmp(pattern, "11100") == 0) || (strcmp(pattern, "11000") == 0)) return 'L';
-    if ((strcmp(pattern, "00111") == 0) || (strcmp(pattern, "00011") == 0)) return 'R';
-    if  (strcmp(pattern, "11111") == 0)                                      return 'B';
-    if  (strcmp(pattern, "00000") == 0)                                      return 'W';
+    static uint8_t last_state[IRSENSORS_COUNT] = {0};
+
+    char pattern[IRSENSORS_COUNT + 1];
+    for (int i = 0; i < IRSENSORS_COUNT; i++) {
+        if      (ir[i] > IR_THRESHOLD_HIGH) last_state[i] = 1;
+        else if (ir[i] < IR_THRESHOLD_LOW)  last_state[i] = 0;
+        /* Entre os dois thresholds: mantém o estado anterior */
+        pattern[i] = last_state[i] ? '1' : '0';
+    }
+    pattern[IRSENSORS_COUNT] = '\0';
+
+    /* Esquerda */
+    if (strcmp(pattern, "11100") == 0 ||
+        strcmp(pattern, "11000") == 0 ||
+        strcmp(pattern, "11110") == 0 ||
+        strcmp(pattern, "10000") == 0) return 'L';
+
+    /* Direita */
+    if (strcmp(pattern, "00111") == 0 ||
+        strcmp(pattern, "00011") == 0 ||
+        strcmp(pattern, "01111") == 0 ||
+        strcmp(pattern, "00001") == 0) return 'R';
+
+    /* Cruzamento / fim */
+    if (strcmp(pattern, "11111") == 0) return 'B';
+
+    /* Sem linha */
+    if (strcmp(pattern, "00000") == 0) return 'W';
+
+    /* Linha normal */
     return 'N';
 }
 
@@ -271,12 +295,12 @@ static void solve_stack(char *stack, int *stack_len) {
             if      (a=='L' && b=='U' && c=='F') repl = 'R';
             else if (a=='R' && b=='U' && c=='F') repl = 'L';
             else if (a=='L' && b=='U' && c=='L') repl = 'F';
-            else if (a=='L' && b=='U' && c=='R') repl = 'U';
             else if (a=='R' && b=='U' && c=='R') repl = 'F';
             else if (a=='L' && b=='U' && c=='R') repl = 'U';
             else if (a=='R' && b=='U' && c=='L') repl = 'U';
             else if (a=='F' && b=='U' && c=='L') repl = 'R';
             else if (a=='F' && b=='U' && c=='R') repl = 'L';
+            else if (a=='F' && b=='U' && c=='F') repl = 'U';
 
             if (repl != '\0') {
                 stack[i] = repl;
