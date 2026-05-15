@@ -6,6 +6,7 @@
 #include "pico/cyw43_arch.h"
 #include "hardware/adc.h"
 #include "hardware/pwm.h"
+#include "hardware/gpio.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -18,6 +19,7 @@
 
 #define START_BUTTON 9
 #define RESET_BUTTON 3
+#define LED_PIN 25
 
 #define ADC_IN_PIN 28
 #define MUXA_PIN 18
@@ -164,6 +166,12 @@ static void buttons_init(void) {
     gpio_init(RESET_BUTTON);
     gpio_set_dir(RESET_BUTTON, GPIO_IN);
     gpio_pull_up(RESET_BUTTON);
+}
+
+static void led_init(void) {
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+    gpio_put(LED_PIN, 0);
 }
 
 static void sensors_init(void) {
@@ -471,10 +479,25 @@ static const char *solve_state_name(solve_state_t s) {
 static void led_task(void *params) {
     (void)params;
     while (true) {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-        vTaskDelay(pdMS_TO_TICKS(250));
+        /* Choose blink period based on state:
+         * - paused (red button): 200 ms period
+         * - waiting for solve: 1000 ms period
+         * - default: 500 ms period
+         */
+        uint32_t period_ms = 500;
+        taskENTER_CRITICAL();
+        bool paused = g_is_paused;
+        run_mode_t mode = g_run_mode;
+        taskEXIT_CRITICAL();
+
+        if (paused) period_ms = 200;
+        else if (mode == MODE_WAIT_SOLVE) period_ms = 1000;
+
+        uint32_t half = period_ms / 2;
+        gpio_put(LED_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(half));
+        gpio_put(LED_PIN, 0);
+        vTaskDelay(pdMS_TO_TICKS(half));
     }
 }
 
@@ -1002,6 +1025,7 @@ int main(void) {
     motors_init();
     sensors_init();
     buttons_init();
+    led_init();
     robot_apply_cmd(ROBOT_STOP);
     printf("Robot ready. Press BLACK button to start mapping.\n");
 
