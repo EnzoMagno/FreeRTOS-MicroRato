@@ -16,8 +16,8 @@
 #define MOTOR2A_PIN 14
 #define MOTOR2B_PIN 15
 
-#define START_BUTTON 8
-#define RESET_BUTTON 2
+#define START_BUTTON 9
+#define RESET_BUTTON 3
 
 #define ADC_IN_PIN 28
 #define MUXA_PIN 18
@@ -25,21 +25,21 @@
 #define MUXC_PIN 20
 
 /* Legacy behavior constants */
-#define PWM_MAX 240
+#define PWM_MAX 180
 #define PWM_WRAP 255
-#define NOMINAL_SPEED 150
-#define FOLLOW_SPEED 130
+#define NOMINAL_SPEED 130
+#define FOLLOW_SPEED 120
 #define MOTOR_MIN_EFFECTIVE_PWM 100
 #define FOLLOW_KP 0.01f
 #define FOLLOW_KI 0.0f
 #define FOLLOW_KD 0.1f
-#define ALIGN_FACTOR 1.2f
+#define ALIGN_FACTOR 1.3f
 
-#define TURN_TIME_U_MS  1600/2
-#define TURN_TIME_L_MS  860/2
-#define TURN_TIME_R_MS  860/2
+#define TURN_TIME_U_MS  1350/2
+#define TURN_TIME_L_MS  950/2
+#define TURN_TIME_R_MS  950/2
 #define U_TURN_POST_STOP_MS 40000
-#define SMALL_FWD_TIME_MS 90
+#define SMALL_FWD_TIME_MS 200
 #define ALIGN_AFTER_UTURN_MS 250
 #define ALIGN_AFTER_TURN_MS 250
 #define SOLVE_START_DELAY_MS 5000
@@ -273,10 +273,10 @@ static void solve_stack(char *stack, int *stack_len) {
             else if (a=='L' && b=='U' && c=='L') repl = 'F';
             else if (a=='L' && b=='U' && c=='R') repl = 'U';
             else if (a=='R' && b=='U' && c=='R') repl = 'F';
-            else if (a=='L' && b=='U' && c=='R') repl = 'U';
             else if (a=='R' && b=='U' && c=='L') repl = 'U';
             else if (a=='F' && b=='U' && c=='L') repl = 'R';
             else if (a=='F' && b=='U' && c=='R') repl = 'L';
+            else if(a=='F' && b=='U' && c=='F') repl = 'U';
 
             if (repl != '\0') {
                 stack[i] = repl;
@@ -507,26 +507,30 @@ static void map_fsm_task(void *params) {
     (void)params;
     TickType_t last = xTaskGetTickCount();
     TickType_t last_stack_print = 0;
+    
+    // Estados anteriores para detecção de borda
     bool button_red_prev = false;
     bool button_black_prev = false;
+    
     TickType_t last_black_edge = 0;
     TickType_t last_red_edge = 0;
 
     while (true) {
-        /* Botão vermelho (RESET_BUTTON): pausa/resume (falling edge, debounced) */
+        /* --- Lógica do Botão Vermelho (RESET_BUTTON) --- */
         bool button_red_pressed = button_pressed(RESET_BUTTON);
+        
+        // Detecção de borda de descida (Pressionou)
         if (button_red_pressed && !button_red_prev) {
             TickType_t now = xTaskGetTickCount();
             if ((now - last_red_edge) > pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS)) {
                 last_red_edge = now;
-                /* Transição de botão pressionado */
+                printf("[BUTTON] RED (Reset) PRESSED\n"); // Debug Pressionado
+
                 if (g_is_paused) {
-                    /* Retomar de pausa */
                     g_run_mode = g_paused_mode;
                     g_is_paused = false;
                     printf("Resuming from pause.\n");
                 } else {
-                    /* Entrar em pausa */
                     g_paused_mode = g_run_mode;
                     g_run_mode = MODE_PAUSED;
                     g_is_paused = true;
@@ -534,26 +538,26 @@ static void map_fsm_task(void *params) {
                     printf("Paused.\n");
                 }
             }
+        } 
+        // Detecção de borda de subida (Soltou)
+        else if (!button_red_pressed && button_red_prev) {
+            printf("[BUTTON] RED (Reset) RELEASED\n"); // Debug Solto
         }
         button_red_prev = button_red_pressed;
 
-        /* Se está pausado, apenas aguarda botão vermelho novamente */
-        if (g_is_paused) {
-            robot_apply_cmd(ROBOT_STOP);
-            vTaskDelayUntil(&last, pdMS_TO_TICKS(MAP_PERIOD_MS));
-            continue;
-        }
 
-        /* Botão preto (START_BUTTON): inicia mapeamento ou solve (falling edge, debounced) */
+        /* --- Lógica do Botão Preto (START_BUTTON) --- */
         bool button_black_pressed = button_pressed(START_BUTTON);
+        
+        // Detecção de borda de descida (Pressionou)
         if (button_black_pressed && !button_black_prev) {
             TickType_t now = xTaskGetTickCount();
             if ((now - last_black_edge) > pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS)) {
                 last_black_edge = now;
-                /* Transição de botão pressionado */
+                printf("[BUTTON] BLACK (Start) PRESSED\n"); // Debug Pressionado
+
                 if (g_run_mode == MODE_IDLE) {
                     if (!g_mapping_done) {
-                        /* First-time mapping */
                         g_run_mode = MODE_MAP;
                         g_map_state = IDLE_MAP;
                         g_solve_state = IDLE_SOLVE;
@@ -565,7 +569,6 @@ static void map_fsm_task(void *params) {
                         g_end_captured = false;
                         printf("Starting mapping...\n");
                     } else {
-                        /* Mapping already done — start solve directly */
                         g_run_mode = MODE_SOLVE;
                         g_solve_state = IDLE_SOLVE;
                         g_solve_stack_pos = 0;
@@ -574,7 +577,6 @@ static void map_fsm_task(void *params) {
                         printf("Starting solve (re-run)...\n");
                     }
                 } else if (g_run_mode == MODE_WAIT_SOLVE) {
-                    /* Iniciar solve from wait state */
                     g_run_mode = MODE_SOLVE;
                     g_solve_state = IDLE_SOLVE;
                     g_solve_stack_pos = 0;
@@ -584,8 +586,12 @@ static void map_fsm_task(void *params) {
                 }
             }
         }
+        // Detecção de borda de subida (Soltou)
+        else if (!button_black_pressed && button_black_prev) {
+            printf("[BUTTON] BLACK (Start) RELEASED\n"); // Debug Solto
+        }
         button_black_prev = button_black_pressed;
-
+        
         char node;
         taskENTER_CRITICAL();
         node = g_sensor.node;
