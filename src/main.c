@@ -24,25 +24,43 @@
 #define MUXB_PIN 19
 #define MUXC_PIN 20
 
-/* Legacy behavior constants */
+/* PWM & Motor */
 #define PWM_MAX 195
 #define PWM_WRAP 255
-#define NOMINAL_SPEED 150
-#define FOLLOW_SPEED 180
 #define MOTOR_MIN_EFFECTIVE_PWM 100
-#define FOLLOW_KP 0.085f
-#define FOLLOW_KI 0.0f
-#define FOLLOW_KD 0.8f
 #define ALIGN_FACTOR 1.3f
-
-#define TURN_TIME_U_MS  1650/2
-#define TURN_TIME_L_MS  860/2
-#define TURN_TIME_R_MS  860/2
 #define U_TURN_POST_STOP_MS 40000
-#define SMALL_FWD_TIME_MS 65
-#define ALIGN_AFTER_UTURN_MS 250
-#define ALIGN_AFTER_TURN_MS 250
 #define SOLVE_START_DELAY_MS 5000
+
+/* ================================================================
+ * Motion Tuning Profiles
+ * ================================================================ */
+
+/* MAP profile: slower and stable for accurate mapping */
+#define MAP_NOMINAL_SPEED        130
+#define MAP_FOLLOW_SPEED         120
+#define MAP_FOLLOW_KP            0.07f
+#define MAP_FOLLOW_KI            0.0f
+#define MAP_FOLLOW_KD            0.5f
+#define MAP_TURN_TIME_U_MS       1800/2
+#define MAP_TURN_TIME_L_MS       920/2
+#define MAP_TURN_TIME_R_MS       920/2
+#define MAP_SMALL_FWD_TIME_MS    150
+#define MAP_ALIGN_AFTER_UTURN_MS 250
+#define MAP_ALIGN_AFTER_TURN_MS  250
+
+/* SOLVE profile: faster for quick solving */
+#define SOLVE_NOMINAL_SPEED        150
+#define SOLVE_FOLLOW_SPEED         180
+#define SOLVE_FOLLOW_KP            0.085f
+#define SOLVE_FOLLOW_KI            0.0f
+#define SOLVE_FOLLOW_KD            0.8f
+#define SOLVE_TURN_TIME_U_MS       1600/2
+#define SOLVE_TURN_TIME_L_MS       840/2
+#define SOLVE_TURN_TIME_R_MS       840/2
+#define SOLVE_SMALL_FWD_TIME_MS    65
+#define SOLVE_ALIGN_AFTER_UTURN_MS 250
+#define SOLVE_ALIGN_AFTER_TURN_MS  250
 
 #define BUTTON_DEBOUNCE_MS 50
 
@@ -121,6 +139,54 @@ static volatile solve_state_t g_solve_state = IDLE_SOLVE;
 static volatile run_mode_t g_paused_mode = MODE_IDLE;
 static volatile bool g_is_paused = false;
 static volatile bool g_mapping_done = false;
+
+static inline bool using_solve_profile(void) {
+    return g_run_mode == MODE_SOLVE;
+}
+
+static inline int motion_nominal_speed(void) {
+    return using_solve_profile() ? SOLVE_NOMINAL_SPEED : MAP_NOMINAL_SPEED;
+}
+
+static inline int motion_follow_speed(void) {
+    return using_solve_profile() ? SOLVE_FOLLOW_SPEED : MAP_FOLLOW_SPEED;
+}
+
+static inline float motion_follow_kp(void) {
+    return using_solve_profile() ? SOLVE_FOLLOW_KP : MAP_FOLLOW_KP;
+}
+
+static inline float motion_follow_ki(void) {
+    return using_solve_profile() ? SOLVE_FOLLOW_KI : MAP_FOLLOW_KI;
+}
+
+static inline float motion_follow_kd(void) {
+    return using_solve_profile() ? SOLVE_FOLLOW_KD : MAP_FOLLOW_KD;
+}
+
+static inline uint32_t motion_turn_time_u_ms(void) {
+    return using_solve_profile() ? SOLVE_TURN_TIME_U_MS : MAP_TURN_TIME_U_MS;
+}
+
+static inline uint32_t motion_turn_time_l_ms(void) {
+    return using_solve_profile() ? SOLVE_TURN_TIME_L_MS : MAP_TURN_TIME_L_MS;
+}
+
+static inline uint32_t motion_turn_time_r_ms(void) {
+    return using_solve_profile() ? SOLVE_TURN_TIME_R_MS : MAP_TURN_TIME_R_MS;
+}
+
+static inline uint32_t motion_small_fwd_time_ms(void) {
+    return using_solve_profile() ? SOLVE_SMALL_FWD_TIME_MS : MAP_SMALL_FWD_TIME_MS;
+}
+
+static inline uint32_t motion_align_after_uturn_ms(void) {
+    return using_solve_profile() ? SOLVE_ALIGN_AFTER_UTURN_MS : MAP_ALIGN_AFTER_UTURN_MS;
+}
+
+static inline uint32_t motion_align_after_turn_ms(void) {
+    return using_solve_profile() ? SOLVE_ALIGN_AFTER_TURN_MS : MAP_ALIGN_AFTER_TURN_MS;
+}
 
 static char g_node_stack[256];
 static int  g_node_stack_len = 0;
@@ -224,10 +290,10 @@ static void set_target_pwm(int left, int right) {
 static void robot_apply_cmd(robot_cmd_t cmd) {
     g_last_cmd = cmd;
     switch (cmd) {
-        case ROBOT_FORWARD:    set_target_pwm( NOMINAL_SPEED,  NOMINAL_SPEED); break;
-        case ROBOT_REVERSE:    set_target_pwm(-NOMINAL_SPEED, -NOMINAL_SPEED); break;
-        case ROBOT_TURN_LEFT:  set_target_pwm(-NOMINAL_SPEED,  NOMINAL_SPEED); break;
-        case ROBOT_TURN_RIGHT: set_target_pwm( NOMINAL_SPEED, -NOMINAL_SPEED); break;
+        case ROBOT_FORWARD:    set_target_pwm( motion_nominal_speed(),  motion_nominal_speed()); break;
+        case ROBOT_REVERSE:    set_target_pwm(-motion_nominal_speed(), -motion_nominal_speed()); break;
+        case ROBOT_TURN_LEFT:  set_target_pwm(-motion_nominal_speed(),  motion_nominal_speed()); break;
+        case ROBOT_TURN_RIGHT: set_target_pwm( motion_nominal_speed(), -motion_nominal_speed()); break;
         case ROBOT_STOP:
         default:               set_target_pwm(0, 0); break; 
     }
@@ -358,7 +424,7 @@ static void robot_follow_line_step() {
     if (sum >= 2500) {
         integral    = 0.0f;
         g_last_cmd  = ROBOT_FORWARD;
-        set_target_pwm(FOLLOW_SPEED, FOLLOW_SPEED);
+        set_target_pwm(motion_follow_speed(), motion_follow_speed());
         return;
     }
 
@@ -369,12 +435,12 @@ static void robot_follow_line_step() {
     float derivative = error - prev_error;
     prev_error = error;
 
-    int correction = (int)((FOLLOW_KP * error) + (FOLLOW_KI * integral) + (FOLLOW_KD * derivative));
+    int correction = (int)((motion_follow_kp() * error) + (motion_follow_ki() * integral) + (motion_follow_kd() * derivative));
     if (correction >  100) correction =  100;
     if (correction < -100) correction = -100;
 
     g_last_cmd = ROBOT_FORWARD;
-    set_target_pwm(FOLLOW_SPEED + correction, FOLLOW_SPEED - correction);
+    set_target_pwm(motion_follow_speed() + correction, motion_follow_speed() - correction);
 }
 
 static void robot_align_line_step() {
@@ -392,7 +458,7 @@ static void robot_align_line_step() {
     if (sum >= 2500) {
         integral    = 0.0f;
         g_last_cmd  = ROBOT_FORWARD;
-        set_target_pwm(FOLLOW_SPEED, FOLLOW_SPEED);
+        set_target_pwm(motion_follow_speed(), motion_follow_speed());
         return;
     }
 
@@ -403,7 +469,7 @@ static void robot_align_line_step() {
     float derivative = error - prev_error;
     prev_error = error;
 
-    int correction = (int)((FOLLOW_KP * error) + (FOLLOW_KI * integral) + (FOLLOW_KD * derivative));
+    int correction = (int)((motion_follow_kp() * error) + (motion_follow_ki() * integral) + (motion_follow_kd() * derivative));
     if (correction >  100) correction =  100;
     if (correction < -100) correction = -100;
 
@@ -667,18 +733,18 @@ static void map_fsm_task(void *params) {
 
                 case GET_INSTRUCTION:
                     robot_apply_cmd(ROBOT_FORWARD);
-                    vTaskDelay(pdMS_TO_TICKS(SMALL_FWD_TIME_MS));
+                    vTaskDelay(pdMS_TO_TICKS(motion_small_fwd_time_ms()));
                     robot_apply_cmd(ROBOT_STOP);
                     break;
 
                 case RIGHT_TURN_SOLVE:
                     robot_apply_cmd(ROBOT_TURN_RIGHT);
-                    vTaskDelay(pdMS_TO_TICKS(TURN_TIME_R_MS));
+                    vTaskDelay(pdMS_TO_TICKS(motion_turn_time_r_ms()));
                     robot_apply_cmd(ROBOT_STOP);
                     vTaskDelay(pdMS_TO_TICKS(50));
                     {
                         TickType_t align_start = xTaskGetTickCount();
-                        while ((xTaskGetTickCount() - align_start) < pdMS_TO_TICKS(ALIGN_AFTER_TURN_MS)) {
+                        while ((xTaskGetTickCount() - align_start) < pdMS_TO_TICKS(motion_align_after_turn_ms())) {
                             robot_follow_line_step();
                             vTaskDelay(pdMS_TO_TICKS(10));
                         }
@@ -690,12 +756,12 @@ static void map_fsm_task(void *params) {
 
                 case LEFT_TURN_SOLVE:
                     robot_apply_cmd(ROBOT_TURN_LEFT);
-                    vTaskDelay(pdMS_TO_TICKS(TURN_TIME_L_MS));
+                    vTaskDelay(pdMS_TO_TICKS(motion_turn_time_l_ms()));
                     // robot_apply_cmd(ROBOT_STOP);
                     // vTaskDelay(pdMS_TO_TICKS(50));
                     {
                         TickType_t align_start = xTaskGetTickCount();
-                        while ((xTaskGetTickCount() - align_start) < pdMS_TO_TICKS(ALIGN_AFTER_TURN_MS)) {
+                        while ((xTaskGetTickCount() - align_start) < pdMS_TO_TICKS(motion_align_after_turn_ms())) {
                             robot_follow_line_step();
                             vTaskDelay(pdMS_TO_TICKS(10));
                         }
@@ -707,7 +773,7 @@ static void map_fsm_task(void *params) {
 
                 case FORWARD_SOLVE:
                     robot_apply_cmd(ROBOT_FORWARD);
-                    vTaskDelay(pdMS_TO_TICKS(SMALL_FWD_TIME_MS));
+                    vTaskDelay(pdMS_TO_TICKS(motion_small_fwd_time_ms()));
                     g_node_count = 0;
                     g_past_node = ' ';
                     g_solve_state = FOLLOW_LINE_SOLVE;
@@ -789,7 +855,7 @@ static void map_fsm_task(void *params) {
 
             case U_TURN:
                 robot_apply_cmd(ROBOT_TURN_RIGHT);
-                vTaskDelay(pdMS_TO_TICKS(TURN_TIME_U_MS));
+                vTaskDelay(pdMS_TO_TICKS(motion_turn_time_u_ms()));
                 // robot_apply_cmd(ROBOT_STOP);
                 // vTaskDelay(pdMS_TO_TICKS(10000000000));
                 /* Check if line was found; if white, continue turning until line found */
@@ -817,7 +883,7 @@ static void map_fsm_task(void *params) {
                 
                 /* Align middle sensor on the line via brief follow-line */
                 TickType_t align_start = xTaskGetTickCount();
-                while ((xTaskGetTickCount() - align_start) < pdMS_TO_TICKS(ALIGN_AFTER_UTURN_MS)) {
+                while ((xTaskGetTickCount() - align_start) < pdMS_TO_TICKS(motion_align_after_uturn_ms())) {
                     robot_align_line_step();
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
@@ -830,14 +896,14 @@ static void map_fsm_task(void *params) {
 
             case LEFT_TURN_MAP:
                 robot_apply_cmd(ROBOT_TURN_LEFT);
-                vTaskDelay(pdMS_TO_TICKS(TURN_TIME_L_MS));  /* 600ms */
+                vTaskDelay(pdMS_TO_TICKS(motion_turn_time_l_ms()));
                 
                 robot_apply_cmd(ROBOT_STOP);
                 vTaskDelay(pdMS_TO_TICKS(50));
                 
                 /* Align middle sensor on the line via brief follow-line */
                 TickType_t align_start_l = xTaskGetTickCount();
-                while ((xTaskGetTickCount() - align_start_l) < pdMS_TO_TICKS(ALIGN_AFTER_TURN_MS)) {
+                while ((xTaskGetTickCount() - align_start_l) < pdMS_TO_TICKS(motion_align_after_turn_ms())) {
                     robot_align_line_step();
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
@@ -850,14 +916,14 @@ static void map_fsm_task(void *params) {
 
             case RIGHT_TURN_MAP:
                 robot_apply_cmd(ROBOT_TURN_RIGHT);
-                vTaskDelay(pdMS_TO_TICKS(TURN_TIME_R_MS));  /* 200ms */
+                vTaskDelay(pdMS_TO_TICKS(motion_turn_time_r_ms()));
                 
                 robot_apply_cmd(ROBOT_STOP);
                 vTaskDelay(pdMS_TO_TICKS(50));
                 
                 /* Align middle sensor on the line via brief follow-line */
                 TickType_t align_start_r = xTaskGetTickCount();
-                while ((xTaskGetTickCount() - align_start_r) < pdMS_TO_TICKS(ALIGN_AFTER_TURN_MS)) {
+                while ((xTaskGetTickCount() - align_start_r) < pdMS_TO_TICKS(motion_align_after_turn_ms())) {
                     robot_align_line_step();
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
@@ -874,7 +940,7 @@ static void map_fsm_task(void *params) {
                 vTaskDelay(pdMS_TO_TICKS(20));
 
                 robot_apply_cmd(ROBOT_FORWARD);
-                vTaskDelay(pdMS_TO_TICKS(SMALL_FWD_TIME_MS));
+                vTaskDelay(pdMS_TO_TICKS(motion_small_fwd_time_ms()));
                 robot_apply_cmd(ROBOT_STOP);
                 /* Relê o nó após avançar */
                 taskENTER_CRITICAL();
