@@ -43,9 +43,9 @@
 #define MAP_FOLLOW_KI            0.0f
 #define MAP_FOLLOW_KD            0.5f
 #define MAP_TURN_TIME_U_MS       1800/2
-#define MAP_TURN_TIME_L_MS       920/2
-#define MAP_TURN_TIME_R_MS       920/2
-#define MAP_SMALL_FWD_TIME_MS    150
+#define MAP_TURN_TIME_L_MS       1020/2
+#define MAP_TURN_TIME_R_MS       1020/2
+#define MAP_SMALL_FWD_TIME_MS    120
 #define MAP_ALIGN_AFTER_UTURN_MS 250
 #define MAP_ALIGN_AFTER_TURN_MS  250
 
