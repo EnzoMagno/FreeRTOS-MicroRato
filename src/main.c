@@ -39,15 +39,16 @@
 /* MAP profile: slower and stable for accurate mapping */
 #define MAP_NOMINAL_SPEED        130
 #define MAP_FOLLOW_SPEED         120
-#define MAP_FOLLOW_KP            0.07f
+#define MAP_FOLLOW_KP            0.06f
 #define MAP_FOLLOW_KI            0.0f
-#define MAP_FOLLOW_KD            0.5f
+#define MAP_FOLLOW_KD            0.7f
 #define MAP_TURN_TIME_U_MS       1800/2
 #define MAP_TURN_TIME_L_MS       1020/2
 #define MAP_TURN_TIME_R_MS       1020/2
 #define MAP_SMALL_FWD_TIME_MS    120
 #define MAP_ALIGN_AFTER_UTURN_MS 250
 #define MAP_ALIGN_AFTER_TURN_MS  250
+#define MAP_STOP_TURN_TIME_U_MS  200
 
 /* SOLVE profile: faster for quick solving */
 #define SOLVE_NOMINAL_SPEED        150
@@ -61,6 +62,7 @@
 #define SOLVE_SMALL_FWD_TIME_MS    65
 #define SOLVE_ALIGN_AFTER_UTURN_MS 250
 #define SOLVE_ALIGN_AFTER_TURN_MS  250
+#define SOLVE_STOP_TURN_TIME_U_MS  100
 
 #define BUTTON_DEBOUNCE_MS 50
 
@@ -166,6 +168,10 @@ static inline float motion_follow_kd(void) {
 
 static inline uint32_t motion_turn_time_u_ms(void) {
     return using_solve_profile() ? SOLVE_TURN_TIME_U_MS : MAP_TURN_TIME_U_MS;
+}
+
+static inline uint32_t motion_stop_turn_time_u_ms(void) {
+    return using_solve_profile() ? SOLVE_STOP_TURN_TIME_U_MS : MAP_STOP_TURN_TIME_U_MS;
 }
 
 static inline uint32_t motion_turn_time_l_ms(void) {
@@ -854,10 +860,10 @@ static void map_fsm_task(void *params) {
                 break;
 
             case U_TURN:
+                robot_apply_cmd(ROBOT_STOP);
+                vTaskDelay(pdMS_TO_TICKS(motion_stop_turn_time_u_ms()));
                 robot_apply_cmd(ROBOT_TURN_RIGHT);
                 vTaskDelay(pdMS_TO_TICKS(motion_turn_time_u_ms()));
-                // robot_apply_cmd(ROBOT_STOP);
-                // vTaskDelay(pdMS_TO_TICKS(10000000000));
                 /* Check if line was found; if white, continue turning until line found */
                 taskENTER_CRITICAL();
                 node = g_sensor.node;
